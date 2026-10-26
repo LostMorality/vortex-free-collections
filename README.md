@@ -10,6 +10,18 @@ Download **speed** stays at Nexus's normal free limit (~3 MB/s). Only the automa
 
 ---
 
+## See it working
+
+A full Nexus collection installed on a **free** account — every mod auto-downloaded and **Enabled**, no per-mod pop-ups and no browser:
+
+![A Nexus collection fully installed and enabled in Vortex's Mods view](docs/mods.png)
+
+The collections themselves, both showing **Enabled** after a hands-off install:
+
+![Installed collections enabled in Vortex](docs/collections.png)
+
+---
+
 ## Install (easiest)
 
 1. Grab `VortexFreeCollections-Setup.exe` from the [Releases](../../releases) page.
