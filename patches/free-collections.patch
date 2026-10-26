@@ -1,0 +1,883 @@
+diff --git a/src/renderer/src/extensions/nexus_integration/freeDownload/errors.ts b/src/renderer/src/extensions/nexus_integration/freeDownload/errors.ts
+new file mode 100644
+index 0000000..a543add
+--- /dev/null
++++ b/src/renderer/src/extensions/nexus_integration/freeDownload/errors.ts
+@@ -0,0 +1,38 @@
++/**
++ * Typed failures the free-download mint can hit. `resolve()` falls back to the stock website
++ * dialog for any of these, so they carry enough detail to log why without being fatal.
++ */
++
++/** The embedded Nexus session isn't signed in (or is signed into a different account). */
++export class NotLoggedIn extends Error {
++  constructor(message = "Not logged in to the embedded Nexus session") {
++    super(message);
++    this.name = this.constructor.name;
++  }
++}
++
++/** Cloudflare (or a similar challenge) is in the way and needs a human to clear it. */
++export class ChallengeBlocked extends Error {
++  constructor(message = "A browser check is blocking the download link") {
++    super(message);
++    this.name = this.constructor.name;
++  }
++}
++
++/** Nexus is rate-limiting / temporarily suspending the account for too many downloads. */
++export class DownloadThrottled extends Error {
++  public readonly retryAfterMs: number;
++  constructor(retryAfterMs: number, message = "Nexus is temporarily throttling downloads") {
++    super(message);
++    this.name = this.constructor.name;
++    this.retryAfterMs = retryAfterMs;
++  }
++}
++
++/** The response didn't contain a usable download link (a signed CDN url or a fully-keyed nxm link). */
++export class MintFailed extends Error {
++  constructor(message = "Could not mint a download link") {
++    super(message);
++    this.name = this.constructor.name;
++  }
++}
+diff --git a/src/renderer/src/extensions/nexus_integration/freeDownload/mintFreeDownloadLink.ts b/src/renderer/src/extensions/nexus_integration/freeDownload/mintFreeDownloadLink.ts
+new file mode 100644
+index 0000000..d8cf3e0
+--- /dev/null
++++ b/src/renderer/src/extensions/nexus_integration/freeDownload/mintFreeDownloadLink.ts
+@@ -0,0 +1,53 @@
++import type NexusT from "@nexusmods/nexus-api";
++import { getErrorMessageOrDefault } from "@vortex/shared";
++
++import { log } from "../../../logging";
++import type NXMUrl from "../NXMUrl";
++import { getInfoGraphQL, nexusGames } from "../util";
++import { MintFailed } from "./errors";
++import { nexusWebSession } from "./nexusWebSession";
++
++/**
++ * Mint an authorised (keyed) nxm link for a keyless mod-file link, using the embedded logged-in
++ * Nexus session. Throws a typed error (see ./errors) when it can't, so the caller can fall back to
++ * the stock website dialog without regressing anything.
++ *
++ * `pageId` is the Nexus page/domain for the game (e.g. "skyrimspecialedition"); the website's
++ * GenerateDownloadUrl call wants the game's *numeric* id, which we look up from the games list
++ * Vortex already fetched, falling back to a GraphQL mod-info query.
++ */
++export async function mintFreeDownloadLink(
++  nexus: NexusT,
++  url: NXMUrl,
++  pageId: string,
++): Promise<string> {
++  const numericGameId = await resolveNumericGameId(nexus, pageId, url.modId, url.fileId);
++  if (numericGameId === undefined) {
++    throw new MintFailed(`no numeric game id for domain ${pageId}`);
++  }
++  return nexusWebSession.mint(pageId, numericGameId, url.modId, url.fileId);
++}
++
++async function resolveNumericGameId(
++  nexus: NexusT,
++  domain: string,
++  modId: number,
++  fileId: number,
++): Promise<number | undefined> {
++  const fromList = nexusGames().find((game) => game.domain_name === domain)?.id;
++  if (typeof fromList === "number") {
++    return fromList;
++  }
++
++  try {
++    const { modInfo } = await getInfoGraphQL(nexus, domain, modId, fileId);
++    const gid = (modInfo as { game_id?: number } | undefined)?.game_id;
++    return typeof gid === "number" ? gid : undefined;
++  } catch (err) {
++    log("warn", "could not resolve numeric game id for free download", {
++      domain,
++      error: getErrorMessageOrDefault(err),
++    });
++    return undefined;
++  }
++}
+diff --git a/src/renderer/src/extensions/nexus_integration/freeDownload/nexusWebSession.ts b/src/renderer/src/extensions/nexus_integration/freeDownload/nexusWebSession.ts
+new file mode 100644
+index 0000000..aad967e
+--- /dev/null
++++ b/src/renderer/src/extensions/nexus_integration/freeDownload/nexusWebSession.ts
+@@ -0,0 +1,377 @@
++import { getErrorMessageOrDefault } from "@vortex/shared";
++
++import { log } from "../../../logging";
++import { UserCanceled } from "../../../util/CustomErrors";
++import { ChallengeBlocked, DownloadThrottled, MintFailed, NotLoggedIn } from "./errors";
++import { MintPacer } from "./pacing";
++
++/** The persistent cookie jar the embedded Nexus session lives in. Survives restarts. */
++export const NEXUS_WEB_PARTITION = "persist:nexus-free";
++
++export const NEXUS_WEB_HOME = "https://www.nexusmods.com/";
++const NEXUS_LOGIN_URL = "https://users.nexusmods.com/auth/sign_in";
++
++/** How long to wait for the user to sign in / clear a challenge before giving up. */
++const PROMPT_TIMEOUT_MS = 5 * 60 * 1000;
++
++/** The minimal slice of an Electron <webview> element we drive. */
++export interface IWebviewNode {
++  executeJavaScript(code: string, userGesture?: boolean): Promise<unknown>;
++  loadURL(url: string): Promise<void> | void;
++  getURL(): string;
++  reload(): void;
++  getAttribute(name: string): string | null;
++}
++
++export type PromptReason = "login" | "challenge";
++
++export interface IFreeSessionUIState {
++  visible: boolean;
++  reason: PromptReason | null;
++}
++
++/** What the mint fetch, run inside the Nexus page, came back with. */
++type FetchOutcome =
++  | { kind: "ok"; url: string }
++  | { kind: "login" }
++  | { kind: "challenge" }
++  | { kind: "throttled" }
++  | { kind: "fail"; detail: string };
++
++/** A keyed link has all three, and Vortex's resolve() checks user_id against the logged-in account. */
++function isKeyedNxm(url: string): boolean {
++  if (!url.startsWith("nxm://")) {
++    return false;
++  }
++  const q = url.slice(url.indexOf("?") + 1);
++  const params = new URLSearchParams(q);
++  return params.has("key") && params.has("expires") && params.has("user_id");
++}
++
++/**
++ * Owns the one embedded, logged-in nexusmods.com session the fork uses to mint authorised download
++ * links for a free account — the same `GenerateDownloadUrl` call the website's own "slow download"
++ * button makes. The link it returns is keyed, so Vortex downloads it through the normal api with no
++ * premium gate, no browser hand-off and no per-mod dialog.
++ *
++ * A single hidden <webview> (supplied by NexusFreeSessionView) does the work: the fetch runs inside
++ * the page, so cookies, Origin and Referer are the real logged-in ones. The view is only ever shown
++ * to the user for the two things a headless request can't do: the one-time sign-in, and clearing a
++ * Cloudflare check.
++ */
++class NexusWebSession {
++  #webview: IWebviewNode | undefined;
++  #domReady = false;
++  readonly #pacer = new MintPacer();
++
++  // set when the user dismisses a sign-in / challenge prompt, so we fall back to the stock dialog
++  // for the rest of the run instead of re-prompting on every remaining mod. Cleared on a fresh
++  // attach (app restart / remount).
++  #userDeclined = false;
++
++  // a tiny observable the view subscribes to, so the singleton stays the source of truth
++  #uiState: IFreeSessionUIState = { visible: false, reason: null };
++  readonly #listeners = new Set<() => void>();
++
++  // resolves when the user finishes the current sign-in / challenge prompt
++  #promptResolve: (() => void) | undefined;
++  #promptReject: ((err: Error) => void) | undefined;
++
++  // ---- wiring to the React view -------------------------------------------------------------
++
++  /** Called by the view once its <webview> is in the DOM and ready. */
++  attachWebview(node: IWebviewNode): void {
++    this.#webview = node;
++    this.#domReady = true;
++    this.#userDeclined = false;
++  }
++
++  detachWebview(): void {
++    this.#webview = undefined;
++    this.#domReady = false;
++  }
++
++  getState(): IFreeSessionUIState {
++    return this.#uiState;
++  }
++
++  subscribe(listener: () => void): () => void {
++    this.#listeners.add(listener);
++    return () => this.#listeners.delete(listener);
++  }
++
++  /** The view calls this when the user says they're done with a prompt. */
++  finishPrompt(): void {
++    this.#promptResolve?.();
++  }
++
++  /** The view calls this when the user dismisses a prompt without finishing. */
++  cancelPrompt(): void {
++    this.#promptReject?.(new UserCanceled(false));
++  }
++
++  #setUI(next: IFreeSessionUIState): void {
++    this.#uiState = next;
++    this.#listeners.forEach((l) => l());
++  }
++
++  // ---- minting ------------------------------------------------------------------------------
++
++  /**
++   * Mint a keyed nxm link for one mod file, or throw a typed failure the caller can fall back on.
++   * Serialised and paced so a run of collection members never trips Nexus's free-download cap.
++   */
++  mint(domain: string, numericGameId: number, modId: number, fileId: number): Promise<string> {
++    return this.#pacer.run(() => this.#mintOnce(domain, numericGameId, modId, fileId));
++  }
++
++  async #mintOnce(
++    domain: string,
++    numericGameId: number,
++    modId: number,
++    fileId: number,
++  ): Promise<string> {
++    await this.#ensureReady();
++
++    // the user already said no to signing in this run; don't nag, let the caller use the dialog
++    if (this.#userDeclined) {
++      throw new NotLoggedIn("sign-in was declined this session");
++    }
++
++    // one retry: the first attempt can legitimately come back "please sign in" or "clear this
++    // check", and after the user does that the second attempt is the real one
++    for (let attempt = 0; attempt < 2; attempt += 1) {
++      const outcome = await this.#fetchDownloadUrl(domain, numericGameId, modId, fileId);
++      switch (outcome.kind) {
++        case "ok":
++          // An nxm:// link must be keyed (so Vortex's resolve() treats it as authorised); a direct
++          // https CDN link is already the signed download url and is handed straight to the fetcher.
++          if (outcome.url.startsWith("nxm://") && !isKeyedNxm(outcome.url)) {
++            throw new MintFailed(`minted link was not keyed: ${outcome.url}`);
++          }
++          return outcome.url;
++        case "login":
++          if (attempt === 1) {
++            throw new NotLoggedIn();
++          }
++          await this.#promptOrDecline("login");
++          break;
++        case "challenge":
++          if (attempt === 1) {
++            throw new ChallengeBlocked();
++          }
++          await this.#promptOrDecline("challenge");
++          break;
++        case "throttled":
++          // let the pacer hold everything else back, and fall back to the dialog for this one
++          this.#pacer.backOff(10 * 60 * 1000);
++          throw new DownloadThrottled(10 * 60 * 1000);
++        case "fail":
++          throw new MintFailed(outcome.detail);
++      }
++    }
++    throw new MintFailed("exhausted mint attempts");
++  }
++
++  /** Run the GenerateDownloadUrl fetch inside the logged-in Nexus page and classify the result. */
++  async #fetchDownloadUrl(
++    domain: string,
++    numericGameId: number,
++    modId: number,
++    fileId: number,
++  ): Promise<FetchOutcome> {
++    const webview = this.#webview;
++    if (webview === undefined) {
++      return { kind: "fail", detail: "no web session" };
++    }
++
++    // the fetch is same-origin to www.nexusmods.com; after a login the page can be left on
++    // users.nexusmods.com, where that fetch would be cross-origin and blocked, so get home first
++    await this.#ensureOnHome(webview);
++
++    const payload = JSON.stringify({ fid: fileId, game_id: numericGameId, domain });
++    // runs in the page's own context: same-origin, real cookies, real Origin/Referer
++    const code = `(async () => {
++      try {
++        const p = ${payload};
++        // skip the ad interstitial (Nexus Download Collection's bypassNexusAdsCookie)
++        try {
++          const exp = Math.floor(Date.now() / 1000) + 31536000;
++          document.cookie = "ab=0|" + exp + "; path=/; domain=.nexusmods.com";
++        } catch (e) {}
++        const body = "fid=" + encodeURIComponent(p.fid)
++          + "&game_id=" + encodeURIComponent(p.game_id) + "&nmm=1";
++        const resp = await fetch(
++          "https://www.nexusmods.com/Core/Libs/Common/Managers/Downloads?GenerateDownloadUrl",
++          {
++            method: "POST",
++            credentials: "include",
++            headers: {
++              "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
++              "X-Requested-With": "XMLHttpRequest",
++            },
++            body,
++          },
++        );
++        const text = await resp.text();
++        return JSON.stringify({ status: resp.status, text: text });
++      } catch (e) {
++        return JSON.stringify({ error: String(e) });
++      }
++    })()`;
++
++    let raw: unknown;
++    try {
++      raw = await webview.executeJavaScript(code);
++    } catch (err) {
++      return { kind: "fail", detail: `executeJavaScript failed: ${getErrorMessageOrDefault(err)}` };
++    }
++    return this.#classify(raw);
++  }
++
++  #classify(raw: unknown): FetchOutcome {
++    let parsed: { status?: number; text?: string; error?: string };
++    try {
++      // the page-side code always returns a JSON string; guard anyway so a non-string can't
++      // stringify to "[object Object]" and be parsed as garbage
++      parsed = JSON.parse(typeof raw === "string" ? raw : JSON.stringify(raw));
++    } catch {
++      return { kind: "fail", detail: "unparseable mint response" };
++    }
++
++    if (parsed.error !== undefined) {
++      // a thrown fetch inside the page is usually the network being blocked (often a challenge)
++      return { kind: "challenge" };
++    }
++
++    const status = parsed.status ?? 0;
++    const text = parsed.text ?? "";
++    const lower = text.toLowerCase();
++
++    // a clean JSON body with a url is the success case. For a free account, GenerateDownloadUrl?nmm=1
++    // answers with a direct, signed CDN link ({"url":"https://supporter-files.nexus-cdn.com/...?md5=
++    // ...&expires=...&user_id=..."}), not an nxm:// link — that's the ready-to-fetch download url, so
++    // accept it. (A keyed nxm:// link is still accepted for the paths that return one.)
++    try {
++      const obj = JSON.parse(text);
++      if (typeof obj?.url === "string" && /^(nxm|https?):\/\//i.test(obj.url)) {
++        return { kind: "ok", url: obj.url };
++      }
++      // Valid JSON, 200, but no url. When the embedded session isn't signed in, this endpoint
++      // answers 200 with an empty array ([]) — not a 401 or a login page — so a urless 200 means
++      // "sign in needed". Prompt once instead of falling back to the per-mod dialog.
++      if (status === 200) {
++        return { kind: "login" };
++      }
++    } catch {
++      /* not JSON — fall through to the html/text classifiers below */
++    }
++
++    if (
++      lower.includes("just a moment") ||
++      lower.includes("cf-turnstile") ||
++      lower.includes("challenge-platform") ||
++      ((status === 403 || status === 503) && lower.includes("cloudflare"))
++    ) {
++      return { kind: "challenge" };
++    }
++    if (lower.includes("suspended") || lower.includes("too many") || status === 429) {
++      return { kind: "throttled" };
++    }
++    if (
++      status === 401 ||
++      lower.includes("replaced-login-link") ||
++      lower.includes("you must be logged in") ||
++      lower.includes("sign in") ||
++      lower.includes("log in")
++    ) {
++      return { kind: "login" };
++    }
++    return { kind: "fail", detail: `status ${status}: ${text.slice(0, 160)}` };
++  }
++
++  // ---- readiness & prompts ------------------------------------------------------------------
++
++  /** Wait until the view has mounted its <webview> and it has loaded a Nexus page. */
++  async #ensureReady(): Promise<void> {
++    const start = Date.now();
++    while (!this.#domReady || this.#webview === undefined) {
++      if (Date.now() - start > 30000) {
++        throw new MintFailed("embedded Nexus session never became ready");
++      }
++      await new Promise((resolve) => setTimeout(resolve, 250));
++    }
++  }
++
++  /** Prompt the user, and remember a dismissal so we don't nag for the rest of the run. */
++  async #promptOrDecline(reason: PromptReason): Promise<void> {
++    try {
++      await this.#prompt(reason);
++    } catch (err) {
++      this.#userDeclined = true;
++      throw err;
++    }
++  }
++
++  /** Make sure the embedded page is on www.nexusmods.com, so the mint fetch runs same-origin. */
++  async #ensureOnHome(webview: IWebviewNode): Promise<void> {
++    try {
++      if (webview.getURL().includes("www.nexusmods.com")) {
++        return;
++      }
++    } catch {
++      /* getURL can throw before the first load; fall through and load home */
++    }
++    try {
++      await webview.loadURL(NEXUS_WEB_HOME);
++    } catch {
++      /* ignore; the poll below is the real gate */
++    }
++    const start = Date.now();
++    while (Date.now() - start < 10000) {
++      try {
++        if (webview.getURL().includes("www.nexusmods.com")) {
++          return;
++        }
++      } catch {
++        /* keep polling */
++      }
++      await new Promise((resolve) => setTimeout(resolve, 200));
++    }
++  }
++
++  /**
++   * Show the embedded session to the user for a sign-in or a challenge, and wait until they finish
++   * (or cancel / time out). Only ever reached when a headless mint says it's needed.
++   */
++  async #prompt(reason: PromptReason): Promise<void> {
++    if (reason === "login" && this.#webview !== undefined) {
++      const url = this.#webview.getURL();
++      if (!url.includes("users.nexusmods.com")) {
++        void this.#webview.loadURL(NEXUS_LOGIN_URL);
++      }
++    }
++
++    log("info", "free download prompting user", { reason });
++    this.#setUI({ visible: true, reason });
++
++    try {
++      await new Promise<void>((resolve, reject) => {
++        this.#promptResolve = resolve;
++        this.#promptReject = reject;
++        setTimeout(() => reject(new UserCanceled(false)), PROMPT_TIMEOUT_MS);
++      });
++    } finally {
++      this.#promptResolve = undefined;
++      this.#promptReject = undefined;
++      this.#setUI({ visible: false, reason: null });
++      // land back on the home page so the next mint runs same-origin to www.nexusmods.com
++      if (this.#webview !== undefined && !this.#webview.getURL().includes("www.nexusmods.com")) {
++        void this.#webview.loadURL(NEXUS_WEB_HOME);
++      }
++    }
++  }
++}
++
++/** Process-wide singleton: there is exactly one embedded Nexus session. */
++export const nexusWebSession = new NexusWebSession();
+diff --git a/src/renderer/src/extensions/nexus_integration/freeDownload/pacing.ts b/src/renderer/src/extensions/nexus_integration/freeDownload/pacing.ts
+new file mode 100644
+index 0000000..c073277
+--- /dev/null
++++ b/src/renderer/src/extensions/nexus_integration/freeDownload/pacing.ts
+@@ -0,0 +1,82 @@
++import { log } from "../../../logging";
++
++/**
++ * Serialises link mints and keeps a free account under Nexus's throttle.
++ *
++ * Nexus suspends a free account for ~10 minutes after roughly 200 downloads in a short window, and
++ * minting a link counts as starting a download. Two battle-tested tools (Nexus Download Collection
++ * and the "nextended" extension) settled on the same guard: a small gap between mints, plus a
++ * pre-emptive long pause once the count approaches the cap, so the account never actually trips it.
++ *
++ * Everything runs through one queue because there is a single embedded web session doing the work,
++ * and because the whole point is to not fire these off in parallel.
++ */
++
++/** Minimum gap between two mints. The downloads themselves are throttled by Nexus to ~3 MB/s; this
++ * only keeps us from hammering the link endpoint. */
++const MIN_GAP_MS = 1200;
++
++/** Mint this many links, then take the long pause before continuing. Kept under the ~200 cap. */
++const BURST_LIMIT = 180;
++
++/** How long to pause once a burst is spent, clearing the rolling window Nexus counts against. */
++const BURST_PAUSE_MS = 5 * 60 * 1000;
++
++/** The window Nexus counts downloads over; once this elapses idle, the burst counter resets. */
++const WINDOW_MS = 10 * 60 * 1000;
++
++const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
++
++export class MintPacer {
++  #chain: Promise<unknown> = Promise.resolve();
++  #lastMintAt = 0;
++  #burstCount = 0;
++  /** A hard back-off end time set when Nexus actually tells us it's throttling. */
++  #throttledUntil = 0;
++
++  /** Run `task` after honouring the inter-mint gap and the burst cap. Mints stay strictly serial. */
++  run<T>(task: () => Promise<T>): Promise<T> {
++    const result = this.#chain.then(() => this.#gated(task));
++    // keep the chain alive even if this task rejects, so one failure doesn't wedge the queue
++    this.#chain = result.then(
++      () => undefined,
++      () => undefined,
++    );
++    return result;
++  }
++
++  /** Nexus said it's throttling us; hold every later mint until the back-off elapses. */
++  backOff(ms: number): void {
++    this.#throttledUntil = Math.max(this.#throttledUntil, Date.now() + ms);
++    log("warn", "free download mint backing off", { ms });
++  }
++
++  async #gated<T>(task: () => Promise<T>): Promise<T> {
++    const now = Date.now();
++
++    // a long idle gap means Nexus's rolling window has drained; start a fresh burst
++    if (now - this.#lastMintAt > WINDOW_MS) {
++      this.#burstCount = 0;
++    }
++
++    if (this.#throttledUntil > now) {
++      await delay(this.#throttledUntil - now);
++      this.#burstCount = 0;
++    }
++
++    if (this.#burstCount >= BURST_LIMIT) {
++      log("info", "free download mint burst cap reached, pausing", { pauseMs: BURST_PAUSE_MS });
++      await delay(BURST_PAUSE_MS);
++      this.#burstCount = 0;
++    }
++
++    const sinceLast = Date.now() - this.#lastMintAt;
++    if (sinceLast < MIN_GAP_MS) {
++      await delay(MIN_GAP_MS - sinceLast);
++    }
++
++    this.#burstCount += 1;
++    this.#lastMintAt = Date.now();
++    return task();
++  }
++}
+diff --git a/src/renderer/src/extensions/nexus_integration/index.tsx b/src/renderer/src/extensions/nexus_integration/index.tsx
+index 355aeca..ea8060d 100644
+--- a/src/renderer/src/extensions/nexus_integration/index.tsx
++++ b/src/renderer/src/extensions/nexus_integration/index.tsx
+@@ -118,6 +118,7 @@ import FreeUserDLDialog from "./views/FreeUserDLDialog";
+ import GoPremiumDashlet from "./views/GoPremiumDashlet";
+ import LoginDialog from "./views/LoginDialog";
+ import LoginIcon from "./views/LoginIcon";
++import NexusFreeSessionView from "./views/NexusFreeSessionView";
+ import {} from "./views/Settings";
+ 
+ let nexus: NexusT;
+@@ -1524,6 +1525,11 @@ function init(context: IExtensionContext): boolean {
+     ...nxmProtocol.dialogHandlers,
+   }));
+ 
++  // Fork feature: hosts the hidden, logged-in Nexus web session used to mint authorised download
++  // links for free accounts (see extensions/nexus_integration/freeDownload). Always mounted so the
++  // session persists; only shows itself for the one-time sign-in or a browser check.
++  context.registerDialog("nexus-free-session", NexusFreeSessionView, () => ({}));
++
+   context.registerBanner(
+     "downloads",
+     () => {
+diff --git a/src/renderer/src/extensions/nexus_integration/nxmProtocol.ts b/src/renderer/src/extensions/nexus_integration/nxmProtocol.ts
+index 8e38e3e..cdb3544 100644
+--- a/src/renderer/src/extensions/nexus_integration/nxmProtocol.ts
++++ b/src/renderer/src/extensions/nexus_integration/nxmProtocol.ts
+@@ -24,6 +24,7 @@ import type { IResolvedURL } from "../download_management/types/ProtocolHandlers
+ import { SITE_ID } from "../gamemode_management/constants";
+ import { addFreeUserDLItem, removeFreeUserDLItem } from "./actions/session";
+ import { NEXUS_BASE_URL } from "./constants";
++import { mintFreeDownloadLink } from "./freeDownload/mintFreeDownloadLink";
+ import { refreshMembership, scheduleMembershipRefresh } from "./membership";
+ import NXMUrl from "./NXMUrl";
+ import { isRateLimited, notifyRateLimited } from "./rateLimit";
+@@ -163,7 +164,7 @@ export class NxmProtocol {
+         return await this.#apiDownload(input, url, pageId);
+       } catch (err) {
+         if (await this.#confirmMembershipEnded(url, err)) {
+-          return this.#websiteDownload(input, url);
++          return this.#freeDownload(input, url, pageId);
+         }
+         throw err;
+       }
+@@ -173,9 +174,79 @@ export class NxmProtocol {
+       return this.#apiDownload(input, url, pageId);
+     }
+ 
+-    return this.#websiteDownload(input, url);
++    return this.#freeDownload(input, url, pageId);
+   };
+ 
++  /**
++   * Fork feature: get a free account a working download without the per-mod website dialog.
++   *
++   * Mint a download link the way the website's own "slow download" button does, using the embedded
++   * logged-in session. A free account's GenerateDownloadUrl answers with a signed CDN link directly;
++   * some paths answer with a keyed nxm:// link instead. Either way the result downloads with no
++   * premium gate, no browser hand-off and no dialog - exactly what a collection install needs to run
++   * hands-off. Falls back to the stock website dialog (#websiteDownload) if the mint can't be done
++   * (user not signed in and declined, a browser check left unsolved, Nexus throttling, or the
++   * embedded session is a different account), so a free user is never worse off than the stock app.
++   */
++  async #freeDownload(input: string, url: NXMUrl, pageId: string): Promise<IResolvedURL> {
++    try {
++      const minted = await mintFreeDownloadLink(this.#nexus, url, pageId);
++      // A keyed nxm:// link re-enters resolve() (which also enforces the account check). A direct
++      // signed CDN link is already what the downloader fetches, so hand it back as a resolved url
++      // (no second api round trip) - but first guard it against a mismatched embedded account.
++      if (minted.startsWith("nxm://")) {
++        return await this.resolve(minted);
++      }
++      this.#assertMintedForThisAccount(minted);
++      return {
++        urls: [minted],
++        updatedUrl: input,
++        meta: {
++          source: "nexus",
++          nexus: { ids: { modId: url.modId, fileId: url.fileId } },
++        } as IResolvedURL["meta"],
++      };
++    } catch (err) {
++      if (err instanceof UserCanceled) {
++        throw err;
++      }
++      log("info", "free download mint unavailable, falling back to website dialog", {
++        modId: url.modId,
++        fileId: url.fileId,
++        error: getErrorMessageOrDefault(err),
++      });
++      return this.#websiteDownload(input, url);
++    }
++  }
++
++  /**
++   * A direct minted link is signed for whichever account the embedded web session is logged into.
++   * resolve() already refuses a keyed nxm:// link minted for another account (it checks user_id);
++   * this applies the same guard to the direct-link path, so signing the embedded session into a
++   * different Nexus account than Vortex uses can't quietly pull downloads under the wrong account.
++   */
++  #assertMintedForThisAccount(mintedUrl: string): void {
++    let mintedUserId: number | undefined;
++    try {
++      const raw = new URL(mintedUrl).searchParams.get("user_id");
++      const parsed = raw !== null ? Number(raw) : NaN;
++      mintedUserId = Number.isFinite(parsed) ? parsed : undefined;
++    } catch {
++      // an unparseable url can't be checked; let the download attempt surface any real problem
++      return;
++    }
++    const accountId = userInfo(this.#api.getState())?.userId;
++    if (mintedUserId !== undefined && accountId !== undefined && mintedUserId !== accountId) {
++      this.#api.showErrorNotification(
++        "Nexus account mismatch",
++        "The embedded Nexus sign-in is a different account than Vortex is logged into. Sign in to " +
++          "nexusmods.com with the same account to download collections automatically.",
++        { allowReport: false, id: "nexus-free-account-mismatch" },
++      );
++      throw new ProcessCanceled("embedded Nexus session is a different account");
++    }
++  }
++
+   /**
+    * Whether the author opted this mod into direct downloads, which makes it free for everyone.
+    * Only the website knows, so a lookup we can't complete counts as "no".
+diff --git a/src/renderer/src/extensions/nexus_integration/views/NexusFreeSessionView.tsx b/src/renderer/src/extensions/nexus_integration/views/NexusFreeSessionView.tsx
+new file mode 100644
+index 0000000..62bc265
+--- /dev/null
++++ b/src/renderer/src/extensions/nexus_integration/views/NexusFreeSessionView.tsx
+@@ -0,0 +1,177 @@
++import * as React from "react";
++import { Button } from "react-bootstrap";
++
++import { log } from "../../../logging";
++import type { IFreeSessionUIState, IWebviewNode } from "../freeDownload/nexusWebSession";
++import {
++  NEXUS_WEB_HOME,
++  NEXUS_WEB_PARTITION,
++  nexusWebSession,
++} from "../freeDownload/nexusWebSession";
++
++const PROMPT_COPY: Record<"login" | "challenge", { title: string; body: string }> = {
++  login: {
++    title: "Sign in to Nexus Mods",
++    body:
++      "Sign in to your Nexus Mods account to turn on automatic, hands-off collection downloads. " +
++      "Use the same account you're logged into in Vortex. You only have to do this once.",
++  },
++  challenge: {
++    title: "Quick browser check",
++    body:
++      "Nexus Mods needs you to complete a short browser check. Once it clears, your collection " +
++      "keeps downloading automatically — no need to do anything else.",
++  },
++};
++
++/**
++ * Hosts the single hidden Nexus web session (see freeDownload/nexusWebSession) and shows it to the
++ * user only when a sign-in or a browser check is needed. The <webview> stays mounted the whole time
++ * so its logged-in session persists; we only toggle its size/position, never reparent it (that would
++ * reload it and drop the session).
++ */
++/** Dialog props Vortex's DialogContainer passes every registered dialog; we don't use them. */
++interface INexusFreeSessionProps {
++  visible?: boolean;
++  onHide?: () => void;
++}
++
++class NexusFreeSessionView extends React.Component<INexusFreeSessionProps, IFreeSessionUIState> {
++  #node: (HTMLElement & IWebviewNode) | null = null;
++  #unsubscribe: (() => void) | undefined;
++
++  constructor(props: INexusFreeSessionProps) {
++    super(props);
++    this.state = nexusWebSession.getState();
++  }
++
++  public componentDidMount(): void {
++    this.#unsubscribe = nexusWebSession.subscribe(() => {
++      this.setState(nexusWebSession.getState());
++    });
++  }
++
++  public componentWillUnmount(): void {
++    this.#unsubscribe?.();
++    nexusWebSession.detachWebview();
++  }
++
++  public render(): React.ReactNode {
++    const { visible, reason } = this.state;
++    const copy = reason !== null ? PROMPT_COPY[reason] : undefined;
++
++    return (
++      <div className="nexus-free-session-root">
++        {visible && (
++          <div style={backdropStyle} onClick={undefined}>
++            {copy !== undefined && (
++              <div style={headerStyle}>
++                <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 6 }}>{copy.title}</div>
++                <div style={{ opacity: 0.85 }}>{copy.body}</div>
++              </div>
++            )}
++            <div style={footerStyle}>
++              <Button onClick={this.#onCancel} style={{ marginRight: 8 }}>
++                Cancel
++              </Button>
++              <Button bsStyle="primary" onClick={this.#onDone}>
++                I&apos;m done
++              </Button>
++            </div>
++          </div>
++        )}
++        {this.#renderWebview(visible)}
++      </div>
++    );
++  }
++
++  #renderWebview(visible: boolean): React.ReactNode {
++    // same element in both states — only the style changes, so the session is never torn down
++    // No useragent override on purpose: overriding the UA string leaves navigator.userAgentData
++    // (client hints) reporting the real engine, and Cloudflare Turnstile fails the login on that
++    // mismatch. The native, self-consistent UA passes the check.
++    return React.createElement("webview", {
++      ref: this.#attach,
++      src: NEXUS_WEB_HOME,
++      partition: NEXUS_WEB_PARTITION,
++      allowpopups: "true",
++      style: visible ? visibleWebviewStyle : hiddenWebviewStyle,
++    });
++  }
++
++  #attach = (node: (HTMLElement & IWebviewNode) | null): void => {
++    if (node === null || node === this.#node) {
++      return;
++    }
++    this.#node = node;
++    node.addEventListener("dom-ready", () => {
++      log("info", "nexus free session webview ready", { url: node.getURL?.() });
++      nexusWebSession.attachWebview(node);
++    });
++  };
++
++  #onDone = (): void => {
++    nexusWebSession.finishPrompt();
++  };
++
++  #onCancel = (): void => {
++    nexusWebSession.cancelPrompt();
++  };
++}
++
++const backdropStyle: React.CSSProperties = {
++  position: "fixed",
++  inset: 0,
++  zIndex: 10000,
++  background: "rgba(0, 0, 0, 0.6)",
++  display: "flex",
++  flexDirection: "column",
++  justifyContent: "flex-start",
++};
++
++const headerStyle: React.CSSProperties = {
++  position: "fixed",
++  top: "4%",
++  left: "12%",
++  width: "76%",
++  zIndex: 10002,
++  color: "#fff",
++  textAlign: "center",
++  textShadow: "0 1px 2px rgba(0,0,0,0.8)",
++};
++
++const footerStyle: React.CSSProperties = {
++  position: "fixed",
++  bottom: "4%",
++  left: 0,
++  width: "100%",
++  zIndex: 10002,
++  display: "flex",
++  justifyContent: "center",
++};
++
++/** Centered panel the webview fills while a prompt is up. */
++const visibleWebviewStyle: React.CSSProperties = {
++  position: "fixed",
++  top: "16%",
++  left: "12%",
++  width: "76%",
++  height: "68%",
++  zIndex: 10001,
++  border: "1px solid rgba(255,255,255,0.15)",
++  borderRadius: 6,
++  background: "#fff",
++};
++
++/** Parked offscreen but still rendered, so the logged-in session keeps running between mints. */
++const hiddenWebviewStyle: React.CSSProperties = {
++  position: "fixed",
++  left: -10000,
++  top: -10000,
++  width: 1,
++  height: 1,
++  opacity: 0,
++  pointerEvents: "none",
++};
++
++export default NexusFreeSessionView;

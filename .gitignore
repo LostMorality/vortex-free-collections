@@ -1,0 +1,10 @@
+# build staging — produced by BUILD.md, not source
+installer/build/renderer.js
+installer/build/patch.js
+
+# installer output
+installer/out/
+
+# node
+node_modules/
+*.log
