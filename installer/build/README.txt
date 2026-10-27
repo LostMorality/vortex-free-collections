@@ -17,7 +17,7 @@ the automatic, no-click behaviour - matches Premium.
 
 Requirements
 ------------
-- Vortex 2.9.0 installed. The installer checks this and warns if it differs.
+- Vortex 2.9.1 installed. The installer checks this and warns if it differs.
 
 How to install
 --------------

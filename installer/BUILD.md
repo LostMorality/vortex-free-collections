@@ -4,8 +4,8 @@ Two outputs: (1) the patched **renderer bundle** (`renderer.js`), built from a V
 
 ## Prerequisites
 
-- **Vortex 2.9.0 source** — `git clone https://github.com/Nexus-Mods/Vortex.git` and check out tag `v2.9.0` (commit `e040930`).
-- **Node 24** and **pnpm 11** (Vortex 2.9.0 is a pnpm + nx monorepo).
+- **Vortex 2.9.1 source** — `git clone https://github.com/Nexus-Mods/Vortex.git` and check out tag `v2.9.1` (commit `c803263`).
+- **Node 24** and **pnpm 11** (Vortex 2.9.1 is a pnpm + nx monorepo).
 - **Inno Setup 6** for the installer — `winget install JRSoftware.InnoSetup` (gives `ISCC.exe`).
 
 ## 1. Build the patched renderer bundle
@@ -13,7 +13,7 @@ Two outputs: (1) the patched **renderer bundle** (`renderer.js`), built from a V
 From the Vortex checkout:
 
 ```bash
-# apply this repo's changes on top of Vortex 2.9.0
+# apply this repo's changes on top of Vortex 2.9.1
 git apply /path/to/this-repo/patches/free-collections.patch
 
 # install JS deps only — the native modules (loot, winapi-bindings, font-scanner)

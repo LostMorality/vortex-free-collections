@@ -1,3 +1,179 @@
+diff --git a/src/renderer/src/extensions/download_management/views/Settings.tsx b/src/renderer/src/extensions/download_management/views/Settings.tsx
+index 34e5763..4d882ec 100644
+--- a/src/renderer/src/extensions/download_management/views/Settings.tsx
++++ b/src/renderer/src/extensions/download_management/views/Settings.tsx
+@@ -54,17 +54,12 @@ import * as selectors from "../../../util/selectors";
+ import { getSafe } from "../../../util/storeHelper";
+ import { cleanFailedTransfer, testPathTransfer, transferPath } from "../../../util/transferPath";
+ import {
+-  Campaign,
+   ciEqual,
+   isChildPath,
+   isPathValid,
+   isReservedDirectory,
+-  nexusModsURL,
+-  Section,
+-  Content,
+ } from "../../../util/util";
+ import getTextMod from "../../mod_management/texts";
+-import { PREMIUM_PATH } from "../../nexus_integration/constants";
+ import {
+   setCopyOnIFF,
+   setDownloadPath,
+@@ -143,7 +138,7 @@ class Settings extends ComponentEx<IProps, IComponentState> {
+   }
+ 
+   public render(): JSX.Element {
+-    const { t, copyOnIFF, downloads, isPremium, maxBandwidth, parallelDownloads } = this.props;
++    const { t, copyOnIFF, downloads, maxBandwidth, parallelDownloads } = this.props;
+     const { downloadPath, progress, progressFile } = this.state;
+ 
+     const pathPreview = getDownloadPath(downloadPath);
+@@ -151,7 +146,6 @@ class Settings extends ComponentEx<IProps, IComponentState> {
+     const validationState = this.validateDownloadPath(pathPreview);
+ 
+     const pathValid = validationState.state !== "error";
+-    const electricBoltIconPath = "assets/icons/electric-bolt.svg";
+ 
+     const hasActivity =
+       Object.keys(downloads).find((dlId) => downloads[dlId].state === "started") !== undefined;
+@@ -230,24 +224,7 @@ class Settings extends ComponentEx<IProps, IComponentState> {
+               min={1}
+               max={10}
+               onChange={this.onChangeParallelDownloads}
+-              disabled={!isPremium}
+             />
+-            {!isPremium ? (
+-              <BSButton id="get-premium-button" onClick={this.goBuyPremium}>
+-                <Image srcs={[electricBoltIconPath]} />
+-                {t("Unlock max download speeds")}
+-              </BSButton>
+-            ) : null}
+-          </div>
+-          <div>
+-            {!isPremium ? (
+-              <p>
+-                {t(
+-                  "Regular users are restricted to 1 download thread - " +
+-                    "Go Premium for up to 10 download threads!",
+-                )}
+-              </p>
+-            ) : null}
+           </div>
+         </FormGroup>
+         <FormGroup id="download-bandwidth-limit">
+@@ -399,16 +376,6 @@ class Settings extends ComponentEx<IProps, IComponentState> {
+     opn(url).catch((err) => undefined);
+   };
+ 
+-  private goBuyPremium = () => {
+-    opn(
+-      nexusModsURL(PREMIUM_PATH, {
+-        section: Section.Users,
+-        campaign: Campaign.BuyPremium,
+-        content: Content.SettingsDownloadAd,
+-      }),
+-    ).catch(() => null);
+-  };
+-
+   private setDownloadPath = (newPath: string) => {
+     this.nextState.downloadPath = newPath;
+   };
+@@ -838,7 +805,7 @@ function mapStateToProps(state: IState): IConnectedProps {
+   const modsInstallPath = selectors.installPath(state);
+   const isPremium = getSafe(state, ["persistent", "nexus", "userInfo", "isPremium"], false);
+   return {
+-    parallelDownloads: isPremium ? state.settings.downloads.maxParallelDownloads : 1,
++    parallelDownloads: state.settings.downloads.maxParallelDownloads,
+     // TODO: this breaks encapsulation
+     isPremium,
+     downloadPath: state.settings.downloads.path,
+diff --git a/src/renderer/src/extensions/mod_management/hooks/useModToolbarActions.hook.tsx b/src/renderer/src/extensions/mod_management/hooks/useModToolbarActions.hook.tsx
+index bc2b58f..5179ccc 100644
+--- a/src/renderer/src/extensions/mod_management/hooks/useModToolbarActions.hook.tsx
++++ b/src/renderer/src/extensions/mod_management/hooks/useModToolbarActions.hook.tsx
+@@ -351,10 +351,6 @@ const useCheckVersionsAction = (t: TFunction): IPositionedAction => {
+   const updateRunning = useSelector((state: IState) =>
+     getSafe<boolean>(state, ["session", "mods", "updatingMods", gameMode], false),
+   );
+-  const isPremium = useSelector((state: IState) =>
+-    getSafe<boolean>(state, ["persistent", "nexus", "userInfo", "isPremium"], false),
+-  );
+-
+   /**
+    * The mods as they are *now*, not as they were when this action was built. The
+    * check writes new version attributes to the store, so whatever runs after it
+@@ -436,7 +432,7 @@ const useCheckVersionsAction = (t: TFunction): IPositionedAction => {
+               ? "All mods up to date"
+               : `${outdated.length} mod update${outdated.length === 1 ? "" : "s"} available`,
+           actions:
+-            isPremium && outdated.length > 0
++            outdated.length > 0
+               ? [
+                   {
+                     title: "Update All",
+@@ -450,7 +446,7 @@ const useCheckVersionsAction = (t: TFunction): IPositionedAction => {
+           displayMS: outdated.length === 0 ? 5000 : undefined,
+         });
+       });
+-  }, [api, gameMode, isPremium, readModsWithState, updateAll]);
++  }, [api, gameMode, readModsWithState, updateAll]);
+ 
+   return useMemo(
+     () => ({
+diff --git a/src/renderer/src/extensions/mod_management/views/CheckModVersionsButton.tsx b/src/renderer/src/extensions/mod_management/views/CheckModVersionsButton.tsx
+index aadc590..1ad9e84 100644
+--- a/src/renderer/src/extensions/mod_management/views/CheckModVersionsButton.tsx
++++ b/src/renderer/src/extensions/mod_management/views/CheckModVersionsButton.tsx
+@@ -65,7 +65,7 @@ class CheckVersionsButton extends ComponentEx<IProps, {}> {
+       type: "success",
+       message: message,
+       actions:
+-        this.props.isPremium && modIds.length > 0
++        modIds.length > 0
+           ? [
+               {
+                 title: "Update All",
+diff --git a/src/renderer/src/extensions/nexus_integration/eventHandlers.ts b/src/renderer/src/extensions/nexus_integration/eventHandlers.ts
+index a8e16fc..a1b2306 100644
+--- a/src/renderer/src/extensions/nexus_integration/eventHandlers.ts
++++ b/src/renderer/src/extensions/nexus_integration/eventHandlers.ts
+@@ -55,10 +55,10 @@ import { setUpdatingMods } from "../mod_management/actions/session";
+ import type { IModListItem } from "../news_dashlet/types";
+ import { setUserInfo } from "./actions/persistent";
+ import { NEXUS_BASE_URL, NEXUS_GAMES_URL } from "./constants";
+-import { ensureFreshMembership, refreshMembership } from "./membership";
++import { refreshMembership } from "./membership";
+ import { nxmModUrl } from "./NXMUrl";
+ import { isRateLimited, notifyRateLimited } from "./rateLimit";
+-import { isLoggedIn, isPremium } from "./selectors";
++import { isLoggedIn } from "./selectors";
+ import type { IValidateKeyDataV2 } from "./types/IValidateKeyData";
+ import {
+   checkModVersionsImpl,
+@@ -367,18 +367,10 @@ function downloadFile(
+ ): Bluebird<string> {
+   const state: IState = api.getState();
+   const gameId = game?.id ?? SITE_ID;
+-  if (game != null && gameId !== SITE_ID && !isPremium(state)) {
+-    // The cached membership is the only thing saying no, and a plan bought on the website pushes
+-    // nothing to Vortex - so confirm it before refusing a download the user can now make.
+-    return Bluebird.resolve(ensureFreshMembership(api, nexus)).then(() => {
+-      if (isPremium(api.getState())) {
+-        return downloadFile(api, nexus, game, modId, fileId, fileName, allowInstall);
+-      }
+-      // nexusmods can't let users download files directly from client, without
+-      // showing ads
+-      return Bluebird.reject(new ProcessCanceled("Only available to premium users"));
+-    });
+-  }
++  // Free builds: don't refuse a free account here. A mod download for a free user falls through to
++  // the normal nxm download below; the nxm protocol handler mints a website "slow download" link so
++  // it runs in Vortex's own download manager, hands-off. Premium accounts still take the faster api
++  // path inside the protocol handler.
+   // TODO: Need some way to identify if this request is actually for a nexus mod
+   const url = nxmModUrl(game, gameId, modId, fileId);
+   log("debug", "downloading from generated nxm link", { url, fileName });
 diff --git a/src/renderer/src/extensions/nexus_integration/freeDownload/errors.ts b/src/renderer/src/extensions/nexus_integration/freeDownload/errors.ts
 new file mode 100644
 index 0000000..a543add
@@ -698,6 +874,31 @@ index 8e38e3e..cdb3544 100644
    /**
     * Whether the author opted this mod into direct downloads, which makes it free for everyone.
     * Only the website knows, so a lookup we can't complete counts as "no".
+diff --git a/src/renderer/src/extensions/nexus_integration/selectors.ts b/src/renderer/src/extensions/nexus_integration/selectors.ts
+index 258e858..c34f6c2 100644
+--- a/src/renderer/src/extensions/nexus_integration/selectors.ts
++++ b/src/renderer/src/extensions/nexus_integration/selectors.ts
+@@ -35,15 +35,11 @@ export const isPremium = (state: IState) => {
+  * "Go Premium" ads at paying customers on startup.
+  * Use this for ad/banner visibility only — not for feature gating.
+  */
+-export const shouldShowPremiumAd = (state: IState) => {
+-  if (!hasPersistentWithNexus(state.persistent)) {
+-    return false;
+-  }
+-  const info = state.persistent.nexus.userInfo;
+-  if (info === undefined) {
+-    return false;
+-  }
+-  return !info.isPremium && !info.isSupporter;
++export const shouldShowPremiumAd = (_state: IState) => {
++  // Free builds unlock the premium conveniences, so never nag with "Go Premium" ads and never gate
++  // the one-click / install-all actions that key off this. Download *routing* still uses isPremium,
++  // so a genuinely free account keeps minting website links instead of hitting the premium-only api.
++  return false;
+ };
+ 
+ export const isLoggedIn = (state: IState) => {
 diff --git a/src/renderer/src/extensions/nexus_integration/views/NexusFreeSessionView.tsx b/src/renderer/src/extensions/nexus_integration/views/NexusFreeSessionView.tsx
 new file mode 100644
 index 0000000..62bc265

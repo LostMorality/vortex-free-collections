@@ -3,7 +3,7 @@
  *
  * Runs as plain Node through the user's OWN Vortex.exe (ELECTRON_RUN_AS_NODE=1), so the installer
  * ships no separate Node runtime and no npm dependencies - this file uses only Node builtins. It
- * patches an installed Vortex 2.9.0 so free accounts get hands-off collection downloads, by swapping
+ * patches an installed Vortex 2.9.1 so free accounts get hands-off collection downloads, by swapping
  * the renderer bundle inside the app.
  *
  * How the swap works (and why it's safe): the shipped Vortex.exe has the Electron fuses
@@ -37,7 +37,7 @@ const path = require("path");
 
 const BACKUP_NAME = "app.asar.vortexfree-backup";
 const MARKER_NAME = ".vortexfree-patched";
-const SUPPORTED_VERSION = "2.9.0";
+const SUPPORTED_VERSION = "2.9.1";
 
 // ---- self-contained asar reader (no @electron/asar dependency) ------------------------------
 //
