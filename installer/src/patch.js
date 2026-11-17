@@ -3,7 +3,7 @@
  *
  * Runs as plain Node through the user's OWN Vortex.exe (ELECTRON_RUN_AS_NODE=1), so the installer
  * ships no separate Node runtime and no npm dependencies - this file uses only Node builtins. It
- * patches an installed Vortex 2.9.1 so free accounts get hands-off collection downloads, by swapping
+ * patches an installed Vortex 2.10.1 so free accounts get hands-off collection downloads, by swapping
  * the renderer bundle inside the app.
  *
  * How the swap works (and why it's safe): the shipped Vortex.exe has the Electron fuses
@@ -37,7 +37,7 @@ const path = require("path");
 
 const BACKUP_NAME = "app.asar.vortexfree-backup";
 const MARKER_NAME = ".vortexfree-patched";
-const SUPPORTED_VERSION = "2.9.1";
+const SUPPORTED_VERSION = "2.10.1";
 
 // ---- self-contained asar reader (no @electron/asar dependency) ------------------------------
 //
@@ -178,6 +178,50 @@ function exeVersion(exe) {
   }
 }
 
+/** Read the Vortex version from package.json inside app.asar. */
+function asarVersion(archivePath) {
+  if (!fs.existsSync(archivePath)) {
+    return undefined;
+  }
+
+  const { header, dataBase } = readAsarHeader(archivePath);
+  const entry = header.files && header.files["package.json"];
+  if (entry === undefined || entry.files !== undefined || entry.unpacked === true) {
+    return undefined;
+  }
+
+  const size = Number(entry.size);
+  const offset = dataBase + Number(entry.offset);
+  if (!Number.isSafeInteger(size) || size < 0 || !Number.isSafeInteger(offset)) {
+    return undefined;
+  }
+
+  const fd = fs.openSync(archivePath, "r");
+  try {
+    const buf = Buffer.alloc(size);
+    let read = 0;
+    while (read < size) {
+      const count = fs.readSync(fd, buf, read, size - read, offset + read);
+      if (count <= 0) {
+        throw new Error("short read for app.asar package.json");
+      }
+      read += count;
+    }
+    const version = JSON.parse(buf.toString("utf8")).version;
+    return typeof version === "string" ? version : undefined;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function installVersion(L) {
+  return exeVersion(L.exe) || asarVersion(L.asarPath) || asarVersion(L.backup);
+}
+
+function isSupportedVersion(version) {
+  return version === SUPPORTED_VERSION || version.startsWith(SUPPORTED_VERSION + ".");
+}
+
 function rmrf(target) {
   if (fs.existsSync(target)) {
     fs.rmSync(target, { recursive: true, force: true });
@@ -187,14 +231,14 @@ function rmrf(target) {
 function doApply(args) {
   const L = layout(args.dir);
 
-  const ver = exeVersion(L.exe);
-  if (!args.force && ver !== undefined && !ver.startsWith(SUPPORTED_VERSION)) {
+  const ver = installVersion(L);
+  if (!args.force && (ver === undefined || !isSupportedVersion(ver))) {
     fail(
       4,
       "this patch is built for Vortex " +
         SUPPORTED_VERSION +
         " but the install reports " +
-        ver +
+        (ver || "an unknown version") +
         ". Not patching.",
     );
   }
@@ -258,9 +302,9 @@ function doRevert(args) {
 
 function doCheck(args) {
   const L = layout(args.dir);
-  const ver = exeVersion(L.exe) || "unknown";
+  const ver = installVersion(L) || "unknown";
   const patched = fs.existsSync(L.backup) && fs.existsSync(L.marker);
-  ok(JSON.stringify({ version: ver, supported: ver.startsWith(SUPPORTED_VERSION), patched }));
+  ok(JSON.stringify({ version: ver, supported: isSupportedVersion(ver), patched }));
 }
 
 function main() {
@@ -282,4 +326,4 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { extractAsar, readAsarHeader, exeVersion };
+module.exports = { extractAsar, readAsarHeader, exeVersion, asarVersion };

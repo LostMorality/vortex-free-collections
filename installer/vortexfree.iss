@@ -1,6 +1,6 @@
 ; VortexFree Collections Patch - Inno Setup installer
 ;
-; Patches an installed Vortex 2.9.1 so FREE Nexus accounts get hands-off collection downloads
+; Patches an installed Vortex 2.10.1 so FREE Nexus accounts get hands-off collection downloads
 ; (the behaviour Nexus sells as Premium "Auto-download all"). It swaps the renderer bundle inside
 ; the app; the signed Vortex.exe is never modified. Fully reversible via the uninstaller.
 ;
@@ -8,8 +8,8 @@
 ; (ELECTRON_RUN_AS_NODE=1), so this installer ships no Node runtime and no npm dependencies.
 
 #define MyName "Vortex Free Collections Patch"
-#define MyVersion "1.1.0"
-#define TargetVortex "2.9.1"
+#define MyVersion "1.2.0"
+#define TargetVortex "2.10.1"
 
 [Setup]
 AppId={{B7E6B4B1-9C3E-4E2A-9E7A-VORTEXFREE01}}
@@ -178,7 +178,7 @@ begin
   Result := rc;
 end;
 
-{ Gate: the selected folder must be a Vortex 2.9.1 install. }
+{ Gate: the selected folder must be a Vortex 2.10.1 install. }
 function NextButtonClick(CurPageID: Integer): Boolean;
 var
   ver: String;
@@ -194,7 +194,7 @@ begin
       exit;
     end;
     GetVersionNumbersString(VortexExe, ver);
-    if Pos(SUPPORTED, ver) <> 1 then
+    if (ver <> SUPPORTED) and (Pos(SUPPORTED + '.', ver) <> 1) then
     begin
       if MsgBox('This patch is built for Vortex ' + SUPPORTED + ', but this install is version '
             + ver + '.' + #13#10 + 'Patching a different version may not work.' + #13#10#13#10
