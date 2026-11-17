@@ -4,8 +4,8 @@ Two outputs: (1) the patched **renderer bundle** (`renderer.js`), built from a V
 
 ## Prerequisites
 
-- **Vortex 2.9.1 source** — `git clone https://github.com/Nexus-Mods/Vortex.git` and check out tag `v2.9.1` (commit `c803263`).
-- **Node 24** and **pnpm 11** (Vortex 2.9.1 is a pnpm + nx monorepo).
+- **Vortex 2.10.1 source** — clone the repository and check out tag `v2.10.1` (commit `0514276ed038745a059cf5230b289df6b576c87d`).
+- **Node 24.22.1** and **pnpm 11.10.0** (Vortex 2.10.1 is a pnpm + nx monorepo).
 - **Inno Setup 6** for the installer — `winget install JRSoftware.InnoSetup` (gives `ISCC.exe`).
 
 ## 1. Build the patched renderer bundle
@@ -13,7 +13,7 @@ Two outputs: (1) the patched **renderer bundle** (`renderer.js`), built from a V
 From the Vortex checkout:
 
 ```bash
-# apply this repo's changes on top of Vortex 2.9.1
+# apply this repo's changes on top of Vortex 2.10.1
 git apply /path/to/this-repo/patches/free-collections.patch
 
 # install JS deps only — the native modules (loot, winapi-bindings, font-scanner)
@@ -27,7 +27,7 @@ pnpm exec nx build @vortex/renderer --skip-nx-cache
 
 The output is `src/main/build/renderer.js`. That is the only built file the patch ships.
 
-> Alternatively, instead of `git apply`, copy the files under this repo's `src/` into the matching paths in your Vortex checkout (they are the complete modified/new files) and build the same way.
+> On Windows, clone with `git -c core.autocrlf=false clone https://github.com/Nexus-Mods/Vortex.git` and check out `v2.10.1` before applying the patch. This keeps the source files in the line-ending format expected by `git apply`. Alternatively, copy the files under this repo's `src/` into the matching paths in your Vortex checkout (they are the complete modified/new files) and build the same way.
 
 ## 2. Build the installer
 

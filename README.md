@@ -1,6 +1,6 @@
 # Vortex Free Collections Patch
 
-A small, reversible patch for [Vortex Mod Manager](https://github.com/Nexus-Mods/Vortex) **2.9.1** that gives a **free Nexus account** the hands-off download conveniences Nexus otherwise sells as Premium. No per-mod pop-ups, no opening a web browser, no userscript manager.
+A small, reversible patch for [Vortex Mod Manager](https://github.com/Nexus-Mods/Vortex) **2.10.1** that gives a **free Nexus account** the hands-off download conveniences Nexus otherwise sells as Premium. No per-mod pop-ups, no opening a web browser, no userscript manager.
 
 **What it unlocks for free accounts:**
 
@@ -40,7 +40,7 @@ Windows may show a blue **"Windows protected your PC"** box because the installe
 
 **To undo:** uninstall *"Vortex Free Collections Patch"* from Windows Settings → Apps. That restores Vortex's original files exactly. Updating or reinstalling Vortex also replaces the patched files.
 
-Requires **Vortex 2.9.1**. The installer checks the version and warns if it differs. A Vortex auto-update replaces the patched files, so just re-run the installer after Vortex updates itself.
+Requires **Vortex 2.10.1**. The installer checks the version and warns if it differs. A Vortex auto-update replaces the patched files, so just re-run the installer after Vortex updates itself.
 
 ---
 
@@ -57,20 +57,20 @@ with your website login cookies. This patch runs that same request from a hidden
 
 The same approach powers **Update All** and the other unlocked buttons: the premium-only *feature gates* in the UI are opened, but the account stays honestly "free" so every download keeps using this website-link method. (Forcing the account flag to premium instead would make Vortex call the Premium-only download API, which a free account is 403'd on — so the real `isPremium` check still drives download *routing*.)
 
-The code lives in `src/renderer/src/extensions/nexus_integration/freeDownload/` and hooks `nxmProtocol.ts`; the premium-gate removals are in `eventHandlers.ts`, `selectors.ts`, the mod-management toolbar, and download settings. See [`patches/free-collections.patch`](patches/free-collections.patch) for the exact diff against Vortex 2.9.1.
+The code lives in `src/renderer/src/extensions/nexus_integration/freeDownload/` and hooks `nxmProtocol.ts`; the premium-gate removals are in `eventHandlers.ts`, `selectors.ts`, the mod-management toolbar, and download settings. See [`patches/free-collections.patch`](patches/free-collections.patch) for the exact diff against Vortex 2.10.1.
 
-The installer never touches the signed `Vortex.exe`. It swaps one file — the renderer bundle — inside Vortex's app files (Vortex 2.9.1 ships with the Electron asar-integrity and `onlyLoadAppFromAsar` fuses off, so an unpacked `resources\app\` folder loads cleanly) and keeps the original as a backup for a clean revert.
+The installer never touches the signed `Vortex.exe`. It swaps one file — the renderer bundle — inside Vortex's app files (Vortex 2.10.1 ships with the Electron asar-integrity and `onlyLoadAppFromAsar` fuses off, so an unpacked `resources\app\` folder loads cleanly) and keeps the original as a backup for a clean revert.
 
 ---
 
 ## Build from source
 
-See [`installer/BUILD.md`](installer/BUILD.md). In short: clone Vortex at the 2.9.1 tag, apply `patches/free-collections.patch`, build the renderer bundle, then build the installer with Inno Setup.
+See [`installer/BUILD.md`](installer/BUILD.md). In short: clone Vortex at the 2.10.1 tag, apply `patches/free-collections.patch`, build the renderer bundle, then build the installer with Inno Setup.
 
 ---
 
 ## License & attribution
 
-Vortex is licensed **GPL-3.0**, and so is this patch — see [`LICENSE`](LICENSE). The patched source (the files under `src/` and the diff in `patches/`) is the corresponding source for the modification, on top of upstream Vortex 2.9.1 (`Nexus-Mods/Vortex`, tag `v2.9.1`). Vortex and the Nexus Mods name are trademarks of their respective owners; this project is not endorsed by them.
+Vortex is licensed **GPL-3.0**, and so is this patch — see [`LICENSE`](LICENSE). The patched source (the files under `src/` and the diff in `patches/`) is the corresponding source for the modification, on top of upstream Vortex 2.10.1 (`Nexus-Mods/Vortex`, tag `v2.10.1`). Vortex and the Nexus Mods name are trademarks of their respective owners; this project is not endorsed by them.
 
 **Use at your own risk.** Automating free downloads may be against the Nexus Mods terms of service, and sharing or using this tool could put your account at risk or draw a takedown. You are responsible for how you use it.

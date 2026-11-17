@@ -89,10 +89,10 @@ index 34e5763..4d882ec 100644
      isPremium,
      downloadPath: state.settings.downloads.path,
 diff --git a/src/renderer/src/extensions/mod_management/hooks/useModToolbarActions.hook.tsx b/src/renderer/src/extensions/mod_management/hooks/useModToolbarActions.hook.tsx
-index bc2b58f..5179ccc 100644
+index 7f961b3..b5a5b10 100644
 --- a/src/renderer/src/extensions/mod_management/hooks/useModToolbarActions.hook.tsx
 +++ b/src/renderer/src/extensions/mod_management/hooks/useModToolbarActions.hook.tsx
-@@ -351,10 +351,6 @@ const useCheckVersionsAction = (t: TFunction): IPositionedAction => {
+@@ -430,10 +430,6 @@ const useCheckVersionsAction = (t: TFunction): IPositionedAction => {
    const updateRunning = useSelector((state: IState) =>
      getSafe<boolean>(state, ["session", "mods", "updatingMods", gameMode], false),
    );
@@ -103,7 +103,7 @@ index bc2b58f..5179ccc 100644
    /**
     * The mods as they are *now*, not as they were when this action was built. The
     * check writes new version attributes to the store, so whatever runs after it
-@@ -436,7 +432,7 @@ const useCheckVersionsAction = (t: TFunction): IPositionedAction => {
+@@ -516,7 +512,7 @@ const useCheckVersionsAction = (t: TFunction): IPositionedAction => {
                ? "All mods up to date"
                : `${outdated.length} mod update${outdated.length === 1 ? "" : "s"} available`,
            actions:
@@ -112,7 +112,7 @@ index bc2b58f..5179ccc 100644
                ? [
                    {
                      title: "Update All",
-@@ -450,7 +446,7 @@ const useCheckVersionsAction = (t: TFunction): IPositionedAction => {
+@@ -530,7 +526,7 @@ const useCheckVersionsAction = (t: TFunction): IPositionedAction => {
            displayMS: outdated.length === 0 ? 5000 : undefined,
          });
        });
@@ -122,10 +122,18 @@ index bc2b58f..5179ccc 100644
    return useMemo(
      () => ({
 diff --git a/src/renderer/src/extensions/mod_management/views/CheckModVersionsButton.tsx b/src/renderer/src/extensions/mod_management/views/CheckModVersionsButton.tsx
-index aadc590..1ad9e84 100644
+index 4c67275..17c0842 100644
 --- a/src/renderer/src/extensions/mod_management/views/CheckModVersionsButton.tsx
 +++ b/src/renderer/src/extensions/mod_management/views/CheckModVersionsButton.tsx
-@@ -65,7 +65,7 @@ class CheckVersionsButton extends ComponentEx<IProps, {}> {
+@@ -23,7 +23,6 @@ interface IConnectedProps {
+   mods: { [modId: string]: IModWithState };
+   gameMode: string;
+   updateRunning: boolean;
+-  isPremium: boolean;
+ }
+ 
+ type IProps = IBaseProps & IConnectedProps;
+@@ -66,7 +65,7 @@ class CheckVersionsButton extends ComponentEx<IProps, {}> {
        type: "success",
        message: message,
        actions:
@@ -134,6 +142,14 @@ index aadc590..1ad9e84 100644
            ? [
                {
                  title: "Update All",
+@@ -175,7 +174,6 @@ function mapStateToProps(state: any): IConnectedProps {
+     mods: modsWithState,
+     gameMode,
+     updateRunning: getSafe(state, ["session", "mods", "updatingMods", gameMode], false),
+-    isPremium: getSafe(state, ["persistent", "nexus", "userInfo", "isPremium"], false),
+   };
+ }
+ 
 diff --git a/src/renderer/src/extensions/nexus_integration/eventHandlers.ts b/src/renderer/src/extensions/nexus_integration/eventHandlers.ts
 index a8e16fc..a1b2306 100644
 --- a/src/renderer/src/extensions/nexus_integration/eventHandlers.ts
